@@ -149,23 +149,32 @@
     };
 
     function renderPhotos() {
-      photosDiv.innerHTML = "";
-      capturedImages.forEach((item, idx) => {
-        const img = document.createElement("img");
-        img.src = item.imgDataUrl;
-        img.onclick = () => {
-          const l = prompt("Label:", item.label || "");
-          if (l !== null) {
-            capturedImages[idx].label = l.trim();
-            renderPhotos();
-            updateTrainBtn();
-          }
-        };
-        const label = document.createElement("span");
-        label.textContent = item.label || "[no label]";
-        photosDiv.append(img, label);
-      });
-    }
+  photosDiv.innerHTML = "";
+  capturedImages.forEach((item, idx) => {
+    const img = document.createElement("img");
+    img.src = item.imgDataUrl;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Label";
+    input.value = item.label || "";
+    input.style.marginTop = "4px";
+    input.onchange = () => {
+      capturedImages[idx].label = input.value.trim();
+      updateTrainBtn();
+    };
+
+    const container = document.createElement("div");
+    container.style.display = "flex";
+    container.style.flexDirection = "column";
+    container.style.alignItems = "center";
+
+    container.appendChild(img);
+    container.appendChild(input);
+    photosDiv.appendChild(container);
+  });
+}
+
 
     function updateTrainBtn() {
       const unique = new Set(capturedImages.map(i => i.label).filter(l => l));
