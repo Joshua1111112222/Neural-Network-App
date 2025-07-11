@@ -4,6 +4,13 @@
   <meta charset="UTF-8" />
   <title>Custom Object Detector with Bounding Box</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  
+  <!-- Apple-specific PWA meta tags -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Custom Object Detector" />
+  <link rel="apple-touch-icon" href="icons/apple-icon-180.png" />
+
   <style>
     body {
       background: #121212;
@@ -33,7 +40,6 @@
     video {
       width: 100%;
       border-radius: 10px;
-      transform: scaleX(-1); /* mirror for natural selfie view */
     }
     #overlay {
       position: absolute;
@@ -162,10 +168,7 @@
       c.width = video.videoWidth;
       c.height = video.videoHeight;
       const ctx = c.getContext("2d");
-      // Mirror horizontally to match video mirroring
-      ctx.translate(c.width, 0);
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, 0, 0, c.width, c.height);
+      ctx.drawImage(video, 0, 0, c.width, c.height); // No mirroring applied here
       const dataUrl = c.toDataURL("image/png");
       capturedImages.push({ imgDataUrl: dataUrl, label: "" });
       renderPhotos();
@@ -200,29 +203,18 @@
       trainBtn.disabled = uniqueLabels.size < 2 || capturedImages.length < 3;
     }
 
-    // Simple data augmentation: horizontal flip randomly
-    function augmentImage(tensor) {
-      if (Math.random() > 0.5) {
-        return tf.image.flipLeftRight(tensor);
-      }
-      return tensor;
-    }
-
     trainBtn.onclick = async () => {
       setStatus("Loading MobileNet feature extractor...");
-      // Load MobileNet and get intermediate layer for features
       const mobilenet = await tf.loadLayersModel("https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json");
       featureExtractor = tf.model({
         inputs: mobilenet.inputs,
         outputs: mobilenet.getLayer("conv_pw_13_relu").output
       });
 
-      // Prepare labels
       const labels = [...new Set(capturedImages.map(i => i.label).filter(l => l))];
       labelToIndex = {};
       labels.forEach((label, i) => labelToIndex[label] = i);
 
-      // Prepare training data
       const xs = [];
       const ys = [];
 
@@ -230,25 +222,19 @@
       for (let imgObj of capturedImages) {
         if (!imgObj.label) continue;
         const t = await toTensor(imgObj.imgDataUrl);
-        const tAug = augmentImage(t);
-        // Expand dims: [1, 224, 224, 3]
-        const input = tAug.expandDims();
+        const input = t.expandDims();
         const features = featureExtractor.predict(input);
         xs.push(features);
         ys.push(labelToIndex[imgObj.label]);
         t.dispose();
-        tAug.dispose();
         input.dispose();
       }
 
-      // Stack all feature tensors into one batch
       const xsStack = tf.concat(xs, 0);
       const ysOneHot = tf.oneHot(tf.tensor1d(ys, "int32"), labels.length);
 
-      // Dispose intermediate tensors
       xs.forEach(t => t.dispose());
 
-      // Build classifier model
       model = tf.sequential();
       model.add(tf.layers.flatten({ inputShape: xsStack.shape.slice(1) }));
       model.add(tf.layers.dense({ units: 100, activation: "relu" }));
@@ -283,7 +269,6 @@
       detectBtn.textContent = isDetecting ? "Stop Detection" : "Start Detection";
       if (isDetecting) detectLoop();
       else {
-        // Clear overlay when detection stops
         const ctx = overlay.getContext("2d");
         ctx.clearRect(0, 0, overlay.width, overlay.height);
       }
@@ -294,40 +279,9 @@
 
       const ctx = overlay.getContext("2d");
       ctx.clearRect(0, 0, overlay.width, overlay.height);
+      ctx.drawImage(video, 0, 0, overlay.width, overlay.height); // No mirroring applied here
 
-      // Draw full mirrored video first
-      ctx.save();
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, -overlay.width, 0, overlay.width, overlay.height);
-      ctx.restore();
-
-      // Crop center square from video for detection
-      const cropSize = 224;
-      const cx = video.videoWidth / 2;
-      const cy = video.videoHeight / 2;
-      const sx = cx - cropSize / 2;
-      const sy = cy - cropSize / 2;
-
-      // Create tensor from cropped region of video element
-      const t = tf.tidy(() => {
-        // Draw cropped frame into offscreen canvas
-        const offCanvas = document.createElement("canvas");
-        offCanvas.width = cropSize;
-        offCanvas.height = cropSize;
-        const offCtx = offCanvas.getContext("2d");
-        // Mirror horizontally for input tensor consistency
-        offCtx.translate(cropSize, 0);
-        offCtx.scale(-1, 1);
-        offCtx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, cropSize, cropSize);
-
-        // Create tensor from cropped canvas and normalize
-        return tf.browser.fromPixels(offCanvas)
-          .toFloat()
-          .div(255)
-          .expandDims();
-      });
-
-      // Extract features and predict
+      const t = tf.tidy(() => tf.image.resizeBilinear(tf.browser.fromPixels(video), [224, 224]).toFloat().div(255).expandDims());
       const features = featureExtractor.predict(t);
       const pred = model.predict(features);
       const data = await pred.data();
@@ -336,30 +290,19 @@
       const maxIndex = data.indexOf(maxConf);
       const label = Object.keys(labelToIndex).find(k => labelToIndex[k] === maxIndex) || "Unknown";
 
-      // Draw bounding box around center crop
       ctx.lineWidth = 4;
       if (maxConf > 0.5) {
         ctx.strokeStyle = "lime";
         ctx.fillStyle = "lime";
         ctx.font = "24px Arial";
-        ctx.strokeRect(
-          (overlay.width / 2) - (cropSize * (overlay.width / video.videoWidth)) / 2,
-          (overlay.height / 2) - (cropSize * (overlay.height / video.videoHeight)) / 2,
-          cropSize * (overlay.width / video.videoWidth),
-          cropSize * (overlay.height / video.videoHeight)
-        );
-        ctx.fillText(
-          `${label} (${(maxConf * 100).toFixed(1)}%)`,
-          (overlay.width / 2) - (cropSize * (overlay.width / video.videoWidth)) / 2 + 10,
-          (overlay.height / 2) - (cropSize * (overlay.height / video.videoHeight)) / 2 + 30
-        );
+        ctx.strokeRect(10, 10, overlay.width - 20, overlay.height - 20);
+        ctx.fillText(`${label} (${(maxConf * 100).toFixed(1)}%)`, 20, 40);
       } else {
         ctx.fillStyle = "red";
         ctx.font = "20px Arial";
         ctx.fillText("No confident detection", 10, 30);
       }
 
-      // Dispose tensors
       t.dispose();
       features.dispose();
       pred.dispose();
