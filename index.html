@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Custom Object Detector</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body {
+      background: #121212;
+      color: white;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 20px;
+      text-align: center;
+    }
+    main-container {
+      display: block;
+    }
+    top-bar {
+      display: block;
+      font-weight: bold;
+      font-size: 1.4rem;
+      margin-bottom: 10px;
+    }
+    #camera-container {
+      position: relative;
+      max-width: 400px;
+      margin: auto;
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
+    }
+    video {
+      width: 100%;
+      border-radius: 10px;
+    }
+    #overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      pointer-events: none;
+    }
+    button {
+      background: #00cc44;
+      border: none;
+      color: white;
+      padding: 10px 20px;
+      margin: 5px;
+      font-size: 1rem;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+    #photos {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 10px;
+      gap: 5px;
+    }
+    #photos img {
+      width: 100px;
+      border: 2px solid #00cc44;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: transform 0.2s ease;
+    }
+    #photos img:hover {
+      transform: scale(1.05);
+      border-color: #00ee55;
+    }
+    #photos span {
+      display: block;
+      font-size: 0.8rem;
+    }
+    #status {
+      margin-top: 10px;
+      min-height: 1.2rem;
+    }
+  </style>
+</head>
+<body>
+  <main-container>
+    <top-bar>Custom Object Detector</top-bar>
+
+    <div id="camera-container">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <div id="controls">
+      <button id="capture-btn">Capture Photo</button>
+      <button id="train-btn" disabled>Train Model</button>
+      <button id="detect-btn" disabled>Start Detection</button>
+      <button id="reset-btn">Reset</button>
+    </div>
+
+    <div id="photos"></div>
+
+    <div id="status"></div>
+  </main-container>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.2.0/dist/tf.min.js"></script>
+  <script>
+    const video = document.getElementById("video");
+    const overlay = document.getElementById("overlay");
+    const captureBtn = document.getElementById("capture-btn");
+    const trainBtn = document.getElementById("train-btn");
+    const detectBtn = document.getElementById("detect-btn");
+    const resetBtn = document.getElementById("reset-btn");
+    const photosDiv = document.getElementById("photos");
+    const status = document.getElementById("status");
+
+    let capturedImages = [];
+    let model;
+    let isDetecting = false;
+    let featureExtractor, labelToIndex;
+
+    function setStatus(msg) { status.textContent = msg; }
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+      .then(stream => {
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          overlay.width = video.videoWidth;
+          overlay.height = video.videoHeight;
+        };
+      }).catch(e => setStatus("Camera access error."));
+
+    captureBtn.onclick = () => {
+      const c = document.createElement("canvas");
+      c.width = video.videoWidth;
+      c.height = video.videoHeight;
+      c.getContext("2d").drawImage(video, 0, 0);
+      const dataUrl = c.toDataURL("image/png");
+      capturedImages.push({ imgDataUrl: dataUrl, label: "" });
+      renderPhotos();
+      setStatus(`Captured ${capturedImages.length} photos.`);
+      updateTrainBtn();
+    };
+
+    function renderPhotos() {
+      photosDiv.innerHTML = "";
+      capturedImages.forEach((item, idx) => {
+        const img = document.createElement("img");
+        img.src = item.imgDataUrl;
+        img.onclick = () => {
+          const l = prompt("Label:", item.label || "");
+          if (l !== null) {
+            capturedImages[idx].label = l.trim();
+            renderPhotos();
+            updateTrainBtn();
+          }
+        };
+        const label = document.createElement("span");
+        label.textContent = item.label || "[no label]";
+        photosDiv.append(img, label);
+      });
+    }
+
+    function updateTrainBtn() {
+      const unique = new Set(capturedImages.map(i => i.label).filter(l => l));
+      trainBtn.disabled = unique.size < 2 || capturedImages.length < 3;
+    }
+
+    trainBtn.onclick = async () => {
+      setStatus("Loading MobileNet...");
+      const mobilenet = await tf.loadLayersModel("https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json");
+      featureExtractor = tf.model({ inputs: mobilenet.inputs, outputs: mobilenet.getLayer("conv_pw_13_relu").output });
+
+      labelToIndex = {};
+      [...new Set(capturedImages.map(i => i.label).filter(l => l))].forEach((l,i) => labelToIndex[l]=i);
+
+      const xs = [], ys = [];
+      for (let img of capturedImages) {
+        if (!img.label) continue;
+        const t = await toTensor(img.imgDataUrl);
+        xs.push(featureExtractor.predict(t.expandDims()).squeeze());
+        ys.push(labelToIndex[img.label]);
+      }
+
+      const xsStack = tf.stack(xs);
+      const ysOneHot = tf.oneHot(tf.tensor1d(ys, "int32"), Object.keys(labelToIndex).length);
+
+      model = tf.sequential();
+      model.add(tf.layers.flatten({ inputShape: xsStack.shape.slice(1) }));
+      model.add(tf.layers.dense({ units: 100, activation: "relu" }));
+      model.add(tf.layers.dropout({ rate: 0.5 }));
+      model.add(tf.layers.dense({ units: Object.keys(labelToIndex).length, activation: "softmax" }));
+      model.compile({ optimizer: tf.train.adam(0.0001), loss: "categoricalCrossentropy", metrics: ["accuracy"] });
+
+      setStatus("Training...");
+      await model.fit(xsStack, ysOneHot, {
+        epochs: 10,
+        callbacks: { onEpochEnd: (e,l) => setStatus(`Epoch ${e+1}/10 — Loss: ${l.loss.toFixed(3)} Acc: ${(l.acc*100).toFixed(1)}%`) }
+      });
+
+      detectBtn.disabled = false;
+      setStatus("Training done! Ready to detect.");
+    };
+
+    detectBtn.onclick = () => {
+      isDetecting = !isDetecting;
+      detectBtn.textContent = isDetecting ? "Stop Detection" : "Start Detection";
+      if (isDetecting) detectLoop();
+    };
+
+    async function detectLoop() {
+      if (!isDetecting) return;
+      const ctx = overlay.getContext("2d");
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      ctx.drawImage(video, 0, 0, overlay.width, overlay.height);
+
+      const t = tf.tidy(() => tf.image.resizeBilinear(tf.browser.fromPixels(video), [224,224]).toFloat().div(255).expandDims());
+      const features = featureExtractor.predict(t).squeeze().expandDims(0);
+      const pred = model.predict(features);
+      const data = await pred.data();
+      const max = data.indexOf(Math.max(...data));
+      const conf = data[max];
+      if (conf > 0.7) {
+        const label = Object.keys(labelToIndex).find(k => labelToIndex[k]===max);
+        ctx.strokeStyle = "lime"; ctx.lineWidth = 4;
+        ctx.strokeRect(5,5,overlay.width-10,overlay.height-10);
+        ctx.fillStyle = "lime"; ctx.font = "20px Arial";
+        ctx.fillText(`${label} (${(conf*100).toFixed(1)}%)`, 10, 30);
+      }
+      tf.dispose([t, features, pred]);
+      requestAnimationFrame(detectLoop);
+    }
+
+    resetBtn.onclick = () => {
+      capturedImages = [];
+      renderPhotos();
+      trainBtn.disabled = true;
+      detectBtn.disabled = true;
+      isDetecting = false;
+      detectBtn.textContent = "Start Detection";
+      overlay.getContext("2d").clearRect(0, 0, overlay.width, overlay.height);
+      setStatus("Reset.");
+    };
+
+    function toTensor(dataUrl) {
+      return new Promise(res => {
+        const img = new Image();
+        img.onload = () => {
+          const c = document.createElement("canvas");
+          c.width = 224; c.height = 224;
+          c.getContext("2d").drawImage(img, 0, 0, 224, 224);
+          res(tf.browser.fromPixels(c).toFloat().div(255));
+        };
+        img.src = dataUrl;
+      });
+    }
+  </script>
+</body>
+</html>
