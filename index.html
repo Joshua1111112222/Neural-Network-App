@@ -2,14 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Custom Object Detector</title>
+  <title>Custom Object Detector with Bounding Box</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#121212" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="Custom Object Detector" />
-  <link rel="apple-touch-icon" href="icons/apple-icon-180.png" />
-  <link rel="manifest" href="manifest.json" />
   <style>
     body {
       background: #121212;
@@ -39,12 +33,19 @@
     video {
       width: 100%;
       border-radius: 10px;
+      transform: scaleX(-1); /* mirror for natural selfie view */
     }
     #overlay {
       position: absolute;
       top: 0;
       left: 0;
       pointer-events: none;
+      width: 100%;
+      height: 100%;
+      border-radius: 10px;
+    }
+    #controls {
+      margin-top: 10px;
     }
     button {
       background: #00cc44;
@@ -67,6 +68,12 @@
       margin-top: 10px;
       gap: 5px;
     }
+    #photos div {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-bottom: 10px;
+    }
     #photos img {
       width: 100px;
       border: 2px solid #00cc44;
@@ -78,9 +85,14 @@
       transform: scale(1.05);
       border-color: #00ee55;
     }
-    #photos span {
-      display: block;
-      font-size: 0.8rem;
+    #photos input {
+      margin-top: 4px;
+      border-radius: 3px;
+      border: none;
+      padding: 4px 6px;
+      font-size: 0.9rem;
+      width: 100px;
+      text-align: center;
     }
     #status {
       margin-top: 10px;
@@ -90,7 +102,7 @@
 </head>
 <body>
   <main-container>
-    <top-bar>Custom Object Detector</top-bar>
+    <top-bar>Custom Object Detector with Bounding Box</top-bar>
 
     <div id="camera-container">
       <video id="video" autoplay playsinline muted></video>
@@ -105,7 +117,6 @@
     </div>
 
     <div id="photos"></div>
-
     <div id="status"></div>
   </main-container>
 
@@ -127,20 +138,34 @@
 
     function setStatus(msg) { status.textContent = msg; }
 
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-      .then(stream => {
+    // Get camera stream
+    async function setupCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
         video.srcObject = stream;
-        video.onloadedmetadata = () => {
-          overlay.width = video.videoWidth;
-          overlay.height = video.videoHeight;
-        };
-      }).catch(e => setStatus("Camera access error."));
+        return new Promise((resolve) => {
+          video.onloadedmetadata = () => {
+            // Set canvas size same as video size
+            overlay.width = video.videoWidth;
+            overlay.height = video.videoHeight;
+            resolve();
+          };
+        });
+      } catch(e) {
+        setStatus("Camera access error: " + e.message);
+      }
+    }
+    setupCamera();
 
     captureBtn.onclick = () => {
       const c = document.createElement("canvas");
       c.width = video.videoWidth;
       c.height = video.videoHeight;
-      c.getContext("2d").drawImage(video, 0, 0);
+      const ctx = c.getContext("2d");
+      // Mirror horizontally to match video mirroring
+      ctx.translate(c.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, c.width, c.height);
       const dataUrl = c.toDataURL("image/png");
       capturedImages.push({ imgDataUrl: dataUrl, label: "" });
       renderPhotos();
@@ -149,100 +174,196 @@
     };
 
     function renderPhotos() {
-  photosDiv.innerHTML = "";
-  capturedImages.forEach((item, idx) => {
-    const img = document.createElement("img");
-    img.src = item.imgDataUrl;
+      photosDiv.innerHTML = "";
+      capturedImages.forEach((item, idx) => {
+        const img = document.createElement("img");
+        img.src = item.imgDataUrl;
 
-    const input = document.createElement("input");
-    input.type = "text";
-    input.placeholder = "Label";
-    input.value = item.label || "";
-    input.style.marginTop = "4px";
-    input.onchange = () => {
-      capturedImages[idx].label = input.value.trim();
-      updateTrainBtn();
-    };
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = "Label";
+        input.value = item.label || "";
+        input.onchange = () => {
+          capturedImages[idx].label = input.value.trim();
+          updateTrainBtn();
+        };
 
-    const container = document.createElement("div");
-    container.style.display = "flex";
-    container.style.flexDirection = "column";
-    container.style.alignItems = "center";
-
-    container.appendChild(img);
-    container.appendChild(input);
-    photosDiv.appendChild(container);
-  });
-}
-
+        const container = document.createElement("div");
+        container.appendChild(img);
+        container.appendChild(input);
+        photosDiv.appendChild(container);
+      });
+    }
 
     function updateTrainBtn() {
-      const unique = new Set(capturedImages.map(i => i.label).filter(l => l));
-      trainBtn.disabled = unique.size < 2 || capturedImages.length < 3;
+      const uniqueLabels = new Set(capturedImages.map(i => i.label).filter(l => l));
+      trainBtn.disabled = uniqueLabels.size < 2 || capturedImages.length < 3;
+    }
+
+    // Simple data augmentation: horizontal flip randomly
+    function augmentImage(tensor) {
+      if (Math.random() > 0.5) {
+        return tf.image.flipLeftRight(tensor);
+      }
+      return tensor;
     }
 
     trainBtn.onclick = async () => {
-      setStatus("Loading MobileNet...");
+      setStatus("Loading MobileNet feature extractor...");
+      // Load MobileNet and get intermediate layer for features
       const mobilenet = await tf.loadLayersModel("https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json");
-      featureExtractor = tf.model({ inputs: mobilenet.inputs, outputs: mobilenet.getLayer("conv_pw_13_relu").output });
+      featureExtractor = tf.model({
+        inputs: mobilenet.inputs,
+        outputs: mobilenet.getLayer("conv_pw_13_relu").output
+      });
 
+      // Prepare labels
+      const labels = [...new Set(capturedImages.map(i => i.label).filter(l => l))];
       labelToIndex = {};
-      [...new Set(capturedImages.map(i => i.label).filter(l => l))].forEach((l,i) => labelToIndex[l]=i);
+      labels.forEach((label, i) => labelToIndex[label] = i);
 
-      const xs = [], ys = [];
-      for (let img of capturedImages) {
-        if (!img.label) continue;
-        const t = await toTensor(img.imgDataUrl);
-        xs.push(featureExtractor.predict(t.expandDims()).squeeze());
-        ys.push(labelToIndex[img.label]);
+      // Prepare training data
+      const xs = [];
+      const ys = [];
+
+      setStatus("Processing training images...");
+      for (let imgObj of capturedImages) {
+        if (!imgObj.label) continue;
+        const t = await toTensor(imgObj.imgDataUrl);
+        const tAug = augmentImage(t);
+        // Expand dims: [1, 224, 224, 3]
+        const input = tAug.expandDims();
+        const features = featureExtractor.predict(input);
+        xs.push(features);
+        ys.push(labelToIndex[imgObj.label]);
+        t.dispose();
+        tAug.dispose();
+        input.dispose();
       }
 
-      const xsStack = tf.stack(xs);
-      const ysOneHot = tf.oneHot(tf.tensor1d(ys, "int32"), Object.keys(labelToIndex).length);
+      // Stack all feature tensors into one batch
+      const xsStack = tf.concat(xs, 0);
+      const ysOneHot = tf.oneHot(tf.tensor1d(ys, "int32"), labels.length);
 
+      // Dispose intermediate tensors
+      xs.forEach(t => t.dispose());
+
+      // Build classifier model
       model = tf.sequential();
       model.add(tf.layers.flatten({ inputShape: xsStack.shape.slice(1) }));
       model.add(tf.layers.dense({ units: 100, activation: "relu" }));
       model.add(tf.layers.dropout({ rate: 0.5 }));
-      model.add(tf.layers.dense({ units: Object.keys(labelToIndex).length, activation: "softmax" }));
-      model.compile({ optimizer: tf.train.adam(0.0001), loss: "categoricalCrossentropy", metrics: ["accuracy"] });
+      model.add(tf.layers.dense({ units: labels.length, activation: "softmax" }));
 
-      setStatus("Training...");
-      await model.fit(xsStack, ysOneHot, {
-        epochs: 10,
-        callbacks: { onEpochEnd: (e,l) => setStatus(`Epoch ${e+1}/10 — Loss: ${l.loss.toFixed(3)} Acc: ${(l.acc*100).toFixed(1)}%`) }
+      model.compile({
+        optimizer: tf.train.adam(0.0001),
+        loss: "categoricalCrossentropy",
+        metrics: ["accuracy"]
       });
 
+      setStatus("Training model...");
+      await model.fit(xsStack, ysOneHot, {
+        epochs: 30,
+        shuffle: true,
+        validationSplit: 0.1,
+        callbacks: {
+          onEpochEnd: (epoch, logs) => setStatus(`Epoch ${epoch+1}/30 — Loss: ${logs.loss.toFixed(3)} Acc: ${(logs.acc*100).toFixed(1)}%`)
+        }
+      });
+
+      xsStack.dispose();
+      ysOneHot.dispose();
+
       detectBtn.disabled = false;
-      setStatus("Training done! Ready to detect.");
+      setStatus("Training complete. Ready to detect.");
     };
 
     detectBtn.onclick = () => {
       isDetecting = !isDetecting;
       detectBtn.textContent = isDetecting ? "Stop Detection" : "Start Detection";
       if (isDetecting) detectLoop();
+      else {
+        // Clear overlay when detection stops
+        const ctx = overlay.getContext("2d");
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+      }
     };
 
     async function detectLoop() {
       if (!isDetecting) return;
+
       const ctx = overlay.getContext("2d");
       ctx.clearRect(0, 0, overlay.width, overlay.height);
-      ctx.drawImage(video, 0, 0, overlay.width, overlay.height);
 
-      const t = tf.tidy(() => tf.image.resizeBilinear(tf.browser.fromPixels(video), [224,224]).toFloat().div(255).expandDims());
-      const features = featureExtractor.predict(t).squeeze().expandDims(0);
+      // Draw full mirrored video first
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, -overlay.width, 0, overlay.width, overlay.height);
+      ctx.restore();
+
+      // Crop center square from video for detection
+      const cropSize = 224;
+      const cx = video.videoWidth / 2;
+      const cy = video.videoHeight / 2;
+      const sx = cx - cropSize / 2;
+      const sy = cy - cropSize / 2;
+
+      // Create tensor from cropped region of video element
+      const t = tf.tidy(() => {
+        // Draw cropped frame into offscreen canvas
+        const offCanvas = document.createElement("canvas");
+        offCanvas.width = cropSize;
+        offCanvas.height = cropSize;
+        const offCtx = offCanvas.getContext("2d");
+        // Mirror horizontally for input tensor consistency
+        offCtx.translate(cropSize, 0);
+        offCtx.scale(-1, 1);
+        offCtx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, cropSize, cropSize);
+
+        // Create tensor from cropped canvas and normalize
+        return tf.browser.fromPixels(offCanvas)
+          .toFloat()
+          .div(255)
+          .expandDims();
+      });
+
+      // Extract features and predict
+      const features = featureExtractor.predict(t);
       const pred = model.predict(features);
       const data = await pred.data();
-      const max = data.indexOf(Math.max(...data));
-      const conf = data[max];
-      if (conf > 0.7) {
-        const label = Object.keys(labelToIndex).find(k => labelToIndex[k]===max);
-        ctx.strokeStyle = "lime"; ctx.lineWidth = 4;
-        ctx.strokeRect(5,5,overlay.width-10,overlay.height-10);
-        ctx.fillStyle = "lime"; ctx.font = "20px Arial";
-        ctx.fillText(`${label} (${(conf*100).toFixed(1)}%)`, 10, 30);
+
+      const maxConf = Math.max(...data);
+      const maxIndex = data.indexOf(maxConf);
+      const label = Object.keys(labelToIndex).find(k => labelToIndex[k] === maxIndex) || "Unknown";
+
+      // Draw bounding box around center crop
+      ctx.lineWidth = 4;
+      if (maxConf > 0.5) {
+        ctx.strokeStyle = "lime";
+        ctx.fillStyle = "lime";
+        ctx.font = "24px Arial";
+        ctx.strokeRect(
+          (overlay.width / 2) - (cropSize * (overlay.width / video.videoWidth)) / 2,
+          (overlay.height / 2) - (cropSize * (overlay.height / video.videoHeight)) / 2,
+          cropSize * (overlay.width / video.videoWidth),
+          cropSize * (overlay.height / video.videoHeight)
+        );
+        ctx.fillText(
+          `${label} (${(maxConf * 100).toFixed(1)}%)`,
+          (overlay.width / 2) - (cropSize * (overlay.width / video.videoWidth)) / 2 + 10,
+          (overlay.height / 2) - (cropSize * (overlay.height / video.videoHeight)) / 2 + 30
+        );
+      } else {
+        ctx.fillStyle = "red";
+        ctx.font = "20px Arial";
+        ctx.fillText("No confident detection", 10, 30);
       }
-      tf.dispose([t, features, pred]);
+
+      // Dispose tensors
+      t.dispose();
+      features.dispose();
+      pred.dispose();
+
       requestAnimationFrame(detectLoop);
     }
 
@@ -258,12 +379,15 @@
     };
 
     function toTensor(dataUrl) {
-      return new Promise(res => {
+      return new Promise((res) => {
         const img = new Image();
+        img.crossOrigin = "anonymous";
         img.onload = () => {
           const c = document.createElement("canvas");
-          c.width = 224; c.height = 224;
-          c.getContext("2d").drawImage(img, 0, 0, 224, 224);
+          c.width = 224;
+          c.height = 224;
+          const ctx = c.getContext("2d");
+          ctx.drawImage(img, 0, 0, 224, 224);
           res(tf.browser.fromPixels(c).toFloat().div(255));
         };
         img.src = dataUrl;
